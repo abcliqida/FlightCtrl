@@ -23,7 +23,7 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-
+#include <string.h>
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -39,6 +39,56 @@ typedef struct {
   float accel_y;
   float accel_z;
 }imu_data_t;
+
+#pragma pack(push, 1)   // 关键：1 字节对齐，禁止编译器插 padding
+
+typedef struct
+{
+  uint32_t iTOW;      // [ms] GPS 时间周内秒
+  uint16_t year;      // 年，如 2026
+  uint8_t  month;     // 月 1..12
+  uint8_t  day;       // 日 1..31
+  uint8_t  hour;      // 时 0..23
+  uint8_t  min;       // 分 0..59
+  uint8_t  sec;       // 秒 0..60
+  uint8_t  valid;     // 有效性标志
+  uint32_t tAcc;      // [ns] 时间精度
+
+  int32_t  nano;      // [ns] 纳秒部分（-1e9..+1e9）
+
+  uint8_t  fixType;   // 定位类型：0=无，3=3D，4=GNSS+DR
+  uint8_t  flags;     // 定位标志
+  uint8_t  flags2;
+  uint8_t  numSV;     // 使用卫星数
+
+  int32_t  lon;       // [1e-7 °] 经度
+  int32_t  lat;       // [1e-7 °] 纬度
+  int32_t  height;    // [mm] 椭球高
+  int32_t  hMSL;      // [mm] 海拔高
+
+  uint32_t hAcc;      // [mm] 水平精度
+  uint32_t vAcc;      // [mm] 垂直精度
+
+  int32_t  velN;      // [mm/s] 北向速度
+  int32_t  velE;      // [mm/s] 东向速度
+  int32_t  velD;      // [mm/s] 地向速度（向下为正）
+  int32_t  gSpeed;    // [mm/s] 地面速率
+
+  int32_t  headMot;   // [1e-5 °] 运动航向
+  uint32_t sAcc;      // [mm/s] 速度精度
+
+  uint32_t headAcc;   // [1e-5 °] 航向精度
+  uint16_t pDOP;      // [0.01] 位置 DOP
+
+  uint8_t  reserved1[6];
+
+  int32_t  headVeh;   // [1e-5 °] 车头方向（仅车载模式）
+  int16_t  magDec;    // [0.01 °] 磁偏角
+  uint16_t magAcc;    // [0.01 °] 磁偏角精度
+} UBX_NAV_PVT_t;
+
+#pragma pack(pop)
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -106,7 +156,7 @@ uint8_t uart4_rx_data[512] __attribute__((section(".dma_buffer")));
 uint8_t temp2 = 0;
 uint8_t temp3 = 0;
 uint8_t temp4 = 0;
-
+UBX_NAV_PVT_t pvt = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -351,7 +401,15 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
   if(huart->Instance == UART4)
   {
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_SET);
+    if (uart4_rx_data[0] == 0xB5 && uart4_rx_data[1] == 0x62)
+    {
+      if (uart4_rx_data[2] == 0x01 && uart4_rx_data[3] == 0x07)
+      {
+        memcpy(&pvt, &uart4_rx_data[6], sizeof(UBX_NAV_PVT_t));
+      }
+    }
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_RESET);
     HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
   }
 }
@@ -361,7 +419,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if(huart->Instance == UART4)
   {
-    uint32_t err = HAL_UART_GetError(huart);
+    // uint32_t err = HAL_UART_GetError(huart);
 
     HAL_UART_DMAStop(huart);
     __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_FEF | UART_CLEAR_PEF);
