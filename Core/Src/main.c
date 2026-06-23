@@ -18,8 +18,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "dma.h"
 #include "spi.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -100,6 +102,7 @@ typedef struct {
 
 /* USER CODE BEGIN PV */
 imu_data_t imu_data = {0};
+uint8_t uart4_rx_data[512] __attribute__((section(".dma_buffer")));
 uint8_t temp2 = 0;
 uint8_t temp3 = 0;
 uint8_t temp4 = 0;
@@ -156,12 +159,16 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM6_Init();
   MX_SPI1_Init();
+  MX_UART4_Init();
   /* USER CODE BEGIN 2 */
   ICM45686_Init();
   HAL_Delay(1000);
   HAL_TIM_Base_Start_IT(&htim6);
+
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -258,7 +265,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM6)
   {
-    HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
+    // HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
 
     ICM45686_ReadReg(ICM_REG_PWR_MGMT0,&temp2);
     ICM45686_ReadReg(ICM_REG_ACCEL_CONFIG,&temp3);
@@ -339,6 +346,35 @@ uint8_t ICM45686_WriteReg(uint8_t addr, uint8_t val)                            
   return 0;
 }
 
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+  if(huart->Instance == UART4)
+  {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0);
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
+  }
+}
+
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if(huart->Instance == UART4)
+  {
+    uint32_t err = HAL_UART_GetError(huart);
+
+    HAL_UART_DMAStop(huart);
+    __HAL_UART_CLEAR_FLAG(huart, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_FEF | UART_CLEAR_PEF);
+
+    // 复位 HAL 库内部的串口状态（非常重要！否则库会一直认为串口处于 BUSY 状态）
+    huart->ErrorCode = HAL_UART_ERROR_NONE;
+    huart->gState = HAL_UART_STATE_READY;
+    huart->RxState = HAL_UART_STATE_READY;
+
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
+  }
+}
+
 /* USER CODE END 4 */
 
  /* MPU Configuration */
@@ -378,10 +414,10 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
+  // __disable_irq();
+  // while (1)
+  // {
+  // }
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
