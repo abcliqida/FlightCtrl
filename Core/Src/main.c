@@ -19,14 +19,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "dma.h"
+#include "i2c.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include <string.h>
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -39,6 +40,12 @@ typedef struct {
   float accel_y;
   float accel_z;
 }imu_data_t;
+
+typedef struct {
+  int16_t mag_x;
+  int16_t mag_y;
+  int16_t mag_z;
+}mag_data_t;
 
 #pragma pack(push, 1)   // 关键：1 字节对齐，禁止编译器插 padding
 
@@ -145,7 +152,13 @@ typedef struct
 #define ACCEL_ODR_25Hz          0x0B                          //dv
 #define ACCEL_ODR_12_5Hz        0x0C                          //dv
 
-
+#define QMC_CHIPID_ADDR         0x00                          //dv
+#define QMC_CHIPID              0x80                          //dv
+#define QMC_DEV_ADDR            0x2c                          //dv
+#define QMC_REG_XOUT_L          0x01                          //dv
+#define QMC_REG_STATUS          0x09                          //dv
+#define QMC_REG_CTRL1           0x0A                          //dv
+#define QMC_REG_CTRL2           0x0B                          //dv
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -153,10 +166,16 @@ typedef struct
 /* USER CODE BEGIN PV */
 imu_data_t imu_data = {0};
 uint8_t uart4_rx_data[512] __attribute__((section(".dma_buffer")));
+UBX_NAV_PVT_t pvt = {0};
+uint8_t i2c1_rx_data[6] = {0};
+mag_data_t mag_data = {0};
+uint8_t qmc_status = {0};
+uint8_t qmc_init_ret = 0xFF;
+uint8_t qmc_read_ret1 = 0xFF;
+uint8_t qmc_read_ret2 = 0xFF;
 uint8_t temp2 = 0;
 uint8_t temp3 = 0;
 uint8_t temp4 = 0;
-UBX_NAV_PVT_t pvt = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -167,6 +186,7 @@ static void MPU_Config(void);
 uint8_t ICM45686_ReadReg(uint8_t addr, uint8_t *val);
 uint8_t ICM45686_WriteReg(uint8_t addr, uint8_t val);
 uint8_t ICM45686_Init(void);
+uint8_t QMC5883_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -213,11 +233,13 @@ int main(void)
   MX_TIM6_Init();
   MX_SPI1_Init();
   MX_UART4_Init();
+  MX_I2C1_Init();
+  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
   ICM45686_Init();
   HAL_Delay(1000);
   HAL_TIM_Base_Start_IT(&htim6);
-
+  qmc_init_ret = QMC5883_Init();
   HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
   /* USER CODE END 2 */
 
@@ -225,6 +247,13 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    HAL_Delay(100);
+    qmc_read_ret1 = HAL_I2C_Mem_Read(&hi2c1,QMC_DEV_ADDR<<1,QMC_REG_XOUT_L,I2C_MEMADD_SIZE_8BIT,i2c1_rx_data,6,HAL_MAX_DELAY);
+    mag_data.mag_x = (int16_t)(i2c1_rx_data[1]<<8 | i2c1_rx_data[0]);
+    mag_data.mag_y = (int16_t)(i2c1_rx_data[3]<<8 | i2c1_rx_data[2]);
+    mag_data.mag_z = (int16_t)(i2c1_rx_data[5]<<8 | i2c1_rx_data[4]);
+    qmc_read_ret2 = HAL_I2C_Mem_Read(&hi2c1,QMC_DEV_ADDR<<1,QMC_REG_STATUS,I2C_MEMADD_SIZE_8BIT,&qmc_status,1,HAL_MAX_DELAY);
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -401,7 +430,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
   if(huart->Instance == UART4)
   {
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_SET);
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_SET);
     if (uart4_rx_data[0] == 0xB5 && uart4_rx_data[1] == 0x62)
     {
       if (uart4_rx_data[2] == 0x01 && uart4_rx_data[3] == 0x07)
@@ -409,7 +438,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         memcpy(&pvt, &uart4_rx_data[6], sizeof(UBX_NAV_PVT_t));
       }
     }
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_RESET);
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_RESET);
     HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
   }
 }
@@ -430,6 +459,42 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     huart->RxState = HAL_UART_STATE_READY;
 
     HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
+  }
+}
+
+
+uint8_t QMC5883_Init(void)
+{
+  uint8_t reg_val;
+  if ( HAL_I2C_Mem_Read(&hi2c1,QMC_DEV_ADDR<<1,QMC_CHIPID_ADDR,\
+    I2C_MEMADD_SIZE_8BIT,&reg_val,1,HAL_MAX_DELAY)!= HAL_OK)
+  {
+    return 1;
+  }
+  else
+  {
+    if (reg_val != QMC_CHIPID)
+    {
+      return 2;
+    }
+    else
+    {
+      reg_val = 0x0C;
+      if (HAL_I2C_Mem_Write(&hi2c1,QMC_DEV_ADDR<<1,QMC_REG_CTRL2,\
+        I2C_MEMADD_SIZE_8BIT,&reg_val,1,HAL_MAX_DELAY)!= HAL_OK)
+      {
+        return 3;
+      }
+
+      // reg_val = 0x3F;
+      reg_val = 0x33;
+      if (HAL_I2C_Mem_Write(&hi2c1,QMC_DEV_ADDR<<1,QMC_REG_CTRL1,\
+        I2C_MEMADD_SIZE_8BIT,&reg_val,1,HAL_MAX_DELAY)!= HAL_OK)
+      {
+        return 4;
+      }
+      return 0;
+    }
   }
 }
 
