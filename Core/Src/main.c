@@ -19,14 +19,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "dma.h"
+#include "i2c.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
-#include <string.h>
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -89,6 +90,13 @@ typedef struct
 
 #pragma pack(pop)
 
+
+typedef struct {
+  float mag_x;
+  float mag_y;
+  float mag_z;
+}mag_data_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -146,6 +154,12 @@ typedef struct
 #define ACCEL_ODR_12_5Hz        0x0C                          //dv
 
 
+#define IST_DEV_ADDR            0x0E                          //dv
+#define IST_WHO_AM_I_ADDR       0x00                          //dv
+#define IST_CHIP_ID             0x10                          //dv
+#define IST_REG_CNTRL1          0x0A                          //dv
+#define IST_REG_CNTRL2          0x0B                          //dv
+#define IST_MAG_X_LOW           0x03                          //dv
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -157,6 +171,8 @@ uint8_t temp2 = 0;
 uint8_t temp3 = 0;
 uint8_t temp4 = 0;
 UBX_NAV_PVT_t pvt = {0};
+uint8_t IST_Init_ret = 0;
+mag_data_t mag_data;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -167,6 +183,7 @@ static void MPU_Config(void);
 uint8_t ICM45686_ReadReg(uint8_t addr, uint8_t *val);
 uint8_t ICM45686_WriteReg(uint8_t addr, uint8_t val);
 uint8_t ICM45686_Init(void);
+uint8_t IST8310_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -213,8 +230,10 @@ int main(void)
   MX_TIM6_Init();
   MX_SPI1_Init();
   MX_UART4_Init();
+  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
   ICM45686_Init();
+  IST_Init_ret = IST8310_Init();
   HAL_Delay(1000);
   HAL_TIM_Base_Start_IT(&htim6);
 
@@ -433,6 +452,46 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   }
 }
 
+uint8_t IST8310_Init(void)
+{
+  uint8_t reg_val = 0;
+  if (HAL_I2C_Mem_Read(&hi2c2,IST_DEV_ADDR << 1,IST_WHO_AM_I_ADDR,\
+    I2C_MEMADD_SIZE_8BIT,&reg_val,1,1000) != HAL_OK)
+  {
+    return 1;
+  }
+  else
+  {
+    if (reg_val != IST_CHIP_ID)
+      return 2;
+    else {
+      reg_val = 0x01;
+      HAL_I2C_Mem_Write(&hi2c2,IST_DEV_ADDR << 1,IST_REG_CNTRL1,\
+        I2C_MEMADD_SIZE_8BIT,&reg_val,1,1000);
+
+      return 0;
+    }
+  }
+}
+
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_15)
+  {
+    uint8_t rx_data[6] = {0};
+    HAL_I2C_Mem_Read(&hi2c2,IST_DEV_ADDR << 1,IST_MAG_X_LOW,\
+    I2C_MEMADD_SIZE_8BIT,rx_data,6,1000);
+
+    mag_data.mag_x = ((int16_t)(rx_data[1]<<8 | rx_data[0]))*300.f;
+    mag_data.mag_y = ((int16_t)(rx_data[3]<<8 | rx_data[2]))*300.f;
+    mag_data.mag_z = -((int16_t)(rx_data[5]<<8 | rx_data[4]))*300.f;
+
+    uint8_t reg_val = 0x01;
+    HAL_I2C_Mem_Write(&hi2c2,IST_DEV_ADDR << 1,IST_REG_CNTRL1,\
+      I2C_MEMADD_SIZE_8BIT,&reg_val,1,1000);
+  }
+}
 /* USER CODE END 4 */
 
  /* MPU Configuration */
