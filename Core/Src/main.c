@@ -39,7 +39,13 @@ typedef struct {
   float accel_x;
   float accel_y;
   float accel_z;
+  uint32_t timestamp;
 }imu_data_t;
+
+typedef struct{
+  imu_data_t data[50];
+  uint8_t write_idx;
+}imu_buf_t;
 
 #pragma pack(push, 1)   // 关键：1 字节对齐，禁止编译器插 padding
 
@@ -111,6 +117,20 @@ typedef struct {
   float z;
 }omega_cmd_t;
 
+typedef struct {
+  int32_t pressure;
+  uint32_t timestamp;
+}baro_data_t;
+
+typedef struct {
+  baro_data_t data[50];
+  uint8_t write_idx;
+}baro_buf_t;
+
+typedef struct {
+  mag_data_t data[50];
+  uint8_t write_idx;
+}mag_buf_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -196,14 +216,16 @@ typedef struct {
 #define MAG_BUF_LEN             0x32                          //dv
 #define GPS_BUF_LEN             0x03                          //dv
 #define IMU_BUF_LEN             0x32                          //dv
+#define BARO_BUF_LEN            0x32                          //dv
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-imu_data_t imu_data[IMU_BUF_LEN] = {0};
+imu_buf_t imu_buf;
+baro_buf_t baro_buf;
+mag_buf_t mag_buf;
 UBX_NAV_PVT_t pvt[GPS_BUF_LEN] = {0};
-mag_data_t mag_data[MAG_BUF_LEN] = {0};
 uint8_t uart4_rx_data_dma[512] __attribute__((section(".dma_buffer")));
 uint8_t temp2 = 0;
 uint8_t temp3 = 0;
@@ -215,9 +237,9 @@ uint8_t spi1_tx_data_dma[13] __attribute__((section(".dma_buffer")))= {0};
 uint8_t spi1_rx_data_dma[13] __attribute__((section(".dma_buffer")))= {0};
 uint8_t spi2_tx_data_dma[4] __attribute__((section(".dma_buffer")))= {0};
 uint8_t spi2_rx_data_dma[4] __attribute__((section(".dma_buffer")))= {0};
-int32_t pressure = 0;
 prop_speed_cmd_t prop_speed_cmd = {0};
 omega_cmd_t omega_cmd = {0};
+uint32_t gps_timestamp = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -392,10 +414,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     /// 读取IMU数据
     spi1_tx_data_dma[0] = ICM_REG_ACCEL_X_UPPER | 0x80;
+    imu_buf.data[imu_buf.write_idx].timestamp = __HAL_TIM_GET_COUNTER(&htim5);
     HAL_GPIO_WritePin(ICM45686_CS_PORT,ICM45686_CS_PIN,GPIO_PIN_RESET);
     HAL_SPI_TransmitReceive_DMA(&hspi1, spi1_tx_data_dma, spi1_rx_data_dma, 13);
 
     // 读取气压计数据
+    baro_buf.data[baro_buf.write_idx].timestamp = __HAL_TIM_GET_COUNTER(&htim5);
     spi2_tx_data_dma[0] = BMP581_PRESSURE_XLSB | 0x80;
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
     HAL_SPI_TransmitReceive_DMA(&hspi2, spi2_tx_data_dma, spi2_rx_data_dma, 4);
@@ -411,21 +435,23 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
   if (hspi->Instance == SPI1)
   {
     HAL_GPIO_WritePin(ICM45686_CS_PORT,ICM45686_CS_PIN,GPIO_PIN_SET);
-    imu_data[0].accel_x = (int16_t)(spi1_rx_data_dma[2]<<8 | spi1_rx_data_dma[1])/4096.f;
-    imu_data[0].accel_y = (int16_t)(spi1_rx_data_dma[4]<<8 | spi1_rx_data_dma[3])/4096.f;
-    imu_data[0].accel_z = (int16_t)(spi1_rx_data_dma[6]<<8 | spi1_rx_data_dma[5])/4096.f;
-    imu_data[0].gyro_x = (int16_t)(spi1_rx_data_dma[8]<<8 | spi1_rx_data_dma[7])/32768.f*2000.f/180.f*M_PI;
-    imu_data[0].gyro_y = (int16_t)(spi1_rx_data_dma[10]<<8 | spi1_rx_data_dma[9])/32768.f*2000.f/180.f*M_PI;
-    imu_data[0].gyro_z = (int16_t)(spi1_rx_data_dma[12]<<8 | spi1_rx_data_dma[11])/32768.f*2000.f/180.f*M_PI;
+    imu_buf.data[imu_buf.write_idx].accel_x = (int16_t)(spi1_rx_data_dma[2]<<8 | spi1_rx_data_dma[1])/4096.f;
+    imu_buf.data[imu_buf.write_idx].accel_y = (int16_t)(spi1_rx_data_dma[4]<<8 | spi1_rx_data_dma[3])/4096.f;
+    imu_buf.data[imu_buf.write_idx].accel_z = (int16_t)(spi1_rx_data_dma[6]<<8 | spi1_rx_data_dma[5])/4096.f;
+    imu_buf.data[imu_buf.write_idx].gyro_x = (int16_t)(spi1_rx_data_dma[8]<<8 | spi1_rx_data_dma[7])/32768.f*2000.f/180.f*M_PI;
+    imu_buf.data[imu_buf.write_idx].gyro_y = (int16_t)(spi1_rx_data_dma[10]<<8 | spi1_rx_data_dma[9])/32768.f*2000.f/180.f*M_PI;
+    imu_buf.data[imu_buf.write_idx].gyro_z = (int16_t)(spi1_rx_data_dma[12]<<8 | spi1_rx_data_dma[11])/32768.f*2000.f/180.f*M_PI;
+    imu_buf.write_idx = (imu_buf.write_idx + 1)%IMU_BUF_LEN;
 
     omega_ctrl(&omega_cmd,&prop_speed_cmd);
   }
   if (hspi->Instance == SPI2) {
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
-    pressure = spi2_rx_data_dma[3]<<16 | spi2_rx_data_dma[2]<<8 | spi2_rx_data_dma[1];
-    if (pressure & 0x800000) {
-      pressure |= 0xFF000000;
+    baro_buf.data[baro_buf.write_idx].pressure = spi2_rx_data_dma[3]<<16 | spi2_rx_data_dma[2]<<8 | spi2_rx_data_dma[1];
+    if (baro_buf.data[baro_buf.write_idx].pressure & 0x800000) {
+      baro_buf.data[baro_buf.write_idx].pressure |= 0xFF000000;
     }
+    baro_buf.write_idx = (baro_buf.write_idx + 1)%BARO_BUF_LEN;
   }
 }
 
@@ -550,13 +576,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_15)
   {
-    mag_data[0].timestamp = __HAL_TIM_GET_COUNTER(&htim5);
+    mag_buf.data[mag_buf.write_idx].timestamp = __HAL_TIM_GET_COUNTER(&htim5);
     HAL_I2C_Mem_Read_DMA(&hi2c2,IST_DEV_ADDR << 1,IST_MAG_X_LOW,\
     I2C_MEMADD_SIZE_8BIT,i2c2_rx_data_dma,6);
   }
 
   if (GPIO_Pin == GPIO_PIN_2)
   {
+    gps_timestamp = __HAL_TIM_GET_COUNTER(&htim5);
   }
 }
 
@@ -569,9 +596,10 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
     HAL_I2C_Mem_Write_DMA(&hi2c2,IST_DEV_ADDR << 1,IST_REG_CNTRL1,\
       I2C_MEMADD_SIZE_8BIT,&i2c2_tx_data_dma,1);
 
-    mag_data[0].mag_x = ((int16_t)(i2c2_rx_data_dma[1]<<8 | i2c2_rx_data_dma[0]));
-    mag_data[0].mag_y = ((int16_t)(i2c2_rx_data_dma[3]<<8 | i2c2_rx_data_dma[2]));
-    mag_data[0].mag_z = -((int16_t)(i2c2_rx_data_dma[5]<<8 | i2c2_rx_data_dma[4]));
+    mag_buf.data[mag_buf.write_idx].mag_x = ((int16_t)(i2c2_rx_data_dma[1]<<8 | i2c2_rx_data_dma[0]));
+    mag_buf.data[mag_buf.write_idx].mag_y = ((int16_t)(i2c2_rx_data_dma[3]<<8 | i2c2_rx_data_dma[2]));
+    mag_buf.data[mag_buf.write_idx].mag_z = -((int16_t)(i2c2_rx_data_dma[5]<<8 | i2c2_rx_data_dma[4]));
+    mag_buf.write_idx = (mag_buf.write_idx + 1)%MAG_BUF_LEN;
   }
 }
 
