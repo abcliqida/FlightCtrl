@@ -95,7 +95,21 @@ typedef struct {
   float mag_x;
   float mag_y;
   float mag_z;
+  uint32_t timestamp;
 }mag_data_t;
+
+typedef struct {
+  float prop1;
+  float prop2;
+  float prop3;
+  float prop4;
+}prop_speed_cmd_t;
+
+typedef struct {
+  float x;
+  float y;
+  float z;
+}omega_cmd_t;
 
 /* USER CODE END PTD */
 
@@ -160,19 +174,50 @@ typedef struct {
 #define IST_REG_CNTRL1          0x0A                          //dv
 #define IST_REG_CNTRL2          0x0B                          //dv
 #define IST_MAG_X_LOW           0x03                          //dv
+
+
+#define BMP581_CHIP_ID_ADDR     0x01                          //dv
+#define BMP581_CHIP_ID          0x50                          //dv
+#define BMP581_STATUS           0x28                          //dv
+#define BMP581_OSR_CONFIG       0x36                          //dv
+#define BMP581_ODR_CONFIG       0x37                          //dv
+#define BMP581_CMD              0x7E                          //dv
+#define BMP581_RESET            0xB6                          //dv
+#define BMP581_INT_SOURCE       0x15                          //dv
+#define BMP581_INT_CONFIG       0x14                          //dv
+#define BMP581_PRESSURE_XLSB    0x20                          //dv
+#define BMP581_INT_MOD_PULSE    0x00                          //dv
+#define BMP581_INT_MOD_LATCH    0x01                          //dv
+#define BMP581_INT_POL_LOW      0x00                          //dv
+#define BMP581_INT_POL_HIGH     0x01                          //dv
+#define BMP581_INT_STATUS       0x27                          //dv
+
+
+#define MAG_BUF_LEN             0x32                          //dv
+#define GPS_BUF_LEN             0x03                          //dv
+#define IMU_BUF_LEN             0x32                          //dv
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-imu_data_t imu_data = {0};
-uint8_t uart4_rx_data[512] __attribute__((section(".dma_buffer")));
+imu_data_t imu_data[IMU_BUF_LEN] = {0};
+UBX_NAV_PVT_t pvt[GPS_BUF_LEN] = {0};
+mag_data_t mag_data[MAG_BUF_LEN] = {0};
+uint8_t uart4_rx_data_dma[512] __attribute__((section(".dma_buffer")));
 uint8_t temp2 = 0;
 uint8_t temp3 = 0;
 uint8_t temp4 = 0;
-UBX_NAV_PVT_t pvt = {0};
 uint8_t IST_Init_ret = 0;
-mag_data_t mag_data;
+uint8_t i2c2_tx_data_dma __attribute__((section(".dma_buffer"))) = {0};
+uint8_t i2c2_rx_data_dma[6] __attribute__((section(".dma_buffer"))) = {0};
+uint8_t spi1_tx_data_dma[13] __attribute__((section(".dma_buffer")))= {0};
+uint8_t spi1_rx_data_dma[13] __attribute__((section(".dma_buffer")))= {0};
+uint8_t spi2_tx_data_dma[4] __attribute__((section(".dma_buffer")))= {0};
+uint8_t spi2_rx_data_dma[4] __attribute__((section(".dma_buffer")))= {0};
+int32_t pressure = 0;
+prop_speed_cmd_t prop_speed_cmd = {0};
+omega_cmd_t omega_cmd = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -184,6 +229,11 @@ uint8_t ICM45686_ReadReg(uint8_t addr, uint8_t *val);
 uint8_t ICM45686_WriteReg(uint8_t addr, uint8_t val);
 uint8_t ICM45686_Init(void);
 uint8_t IST8310_Init(void);
+uint8_t BMP581_Init(void);
+void omega_ctrl(omega_cmd_t* omega_cmd,prop_speed_cmd_t* p);
+uint8_t BMP581_ReadReg(uint8_t reg_addr,uint8_t* reg_data);
+uint8_t BMP581_WriteReg(uint8_t reg_addr,uint8_t reg_data);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -227,17 +277,23 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_TIM6_Init();
   MX_SPI1_Init();
   MX_UART4_Init();
   MX_I2C2_Init();
+  MX_TIM5_Init();
+  MX_TIM3_Init();
+  MX_TIM2_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
   ICM45686_Init();
   IST_Init_ret = IST8310_Init();
+  BMP581_Init();
   HAL_Delay(1000);
-  HAL_TIM_Base_Start_IT(&htim6);
+  HAL_TIM_Base_Start(&htim5);
+  HAL_TIM_Base_Start_IT(&htim3);
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data_dma,512);
 
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -332,29 +388,44 @@ void PeriphCommonClock_Config(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance == TIM6)
+  if (htim->Instance == TIM3)
   {
-    // HAL_GPIO_TogglePin(GPIOC,GPIO_PIN_0);
-
-    ICM45686_ReadReg(ICM_REG_PWR_MGMT0,&temp2);
-    ICM45686_ReadReg(ICM_REG_ACCEL_CONFIG,&temp3);
-    ICM45686_ReadReg(ICM_REG_GYRO_CONFIG0,&temp4);
-
-
     /// 读取IMU数据
-    uint8_t tx_data[13] = {0};
-    uint8_t rx_data[13] = {0};
-
-    tx_data[0] = ICM_REG_ACCEL_X_UPPER | 0x80;
+    spi1_tx_data_dma[0] = ICM_REG_ACCEL_X_UPPER | 0x80;
     HAL_GPIO_WritePin(ICM45686_CS_PORT,ICM45686_CS_PIN,GPIO_PIN_RESET);
-    HAL_SPI_TransmitReceive(&hspi1, tx_data, rx_data, 13, HAL_MAX_DELAY);
+    HAL_SPI_TransmitReceive_DMA(&hspi1, spi1_tx_data_dma, spi1_rx_data_dma, 13);
+
+    // 读取气压计数据
+    spi2_tx_data_dma[0] = BMP581_PRESSURE_XLSB | 0x80;
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET);
+    HAL_SPI_TransmitReceive_DMA(&hspi2, spi2_tx_data_dma, spi2_rx_data_dma, 4);
+  }
+  if (htim->Instance == TIM2)
+  {
+    //todo:ESKF()
+  }
+}
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+  if (hspi->Instance == SPI1)
+  {
     HAL_GPIO_WritePin(ICM45686_CS_PORT,ICM45686_CS_PIN,GPIO_PIN_SET);
-    imu_data.accel_x = (int16_t)(rx_data[2]<<8 | rx_data[1])/4096.f;
-    imu_data.accel_y = (int16_t)(rx_data[4]<<8 | rx_data[3])/4096.f;
-    imu_data.accel_z = (int16_t)(rx_data[6]<<8 | rx_data[5])/4096.f;
-    imu_data.gyro_x = (int16_t)(rx_data[8]<<8 | rx_data[7])/32768.f*2000.f/180.f*M_PI;
-    imu_data.gyro_y = (int16_t)(rx_data[10]<<8 | rx_data[9])/32768.f*2000.f/180.f*M_PI;
-    imu_data.gyro_z = (int16_t)(rx_data[12]<<8 | rx_data[11])/32768.f*2000.f/180.f*M_PI;
+    imu_data[0].accel_x = (int16_t)(spi1_rx_data_dma[2]<<8 | spi1_rx_data_dma[1])/4096.f;
+    imu_data[0].accel_y = (int16_t)(spi1_rx_data_dma[4]<<8 | spi1_rx_data_dma[3])/4096.f;
+    imu_data[0].accel_z = (int16_t)(spi1_rx_data_dma[6]<<8 | spi1_rx_data_dma[5])/4096.f;
+    imu_data[0].gyro_x = (int16_t)(spi1_rx_data_dma[8]<<8 | spi1_rx_data_dma[7])/32768.f*2000.f/180.f*M_PI;
+    imu_data[0].gyro_y = (int16_t)(spi1_rx_data_dma[10]<<8 | spi1_rx_data_dma[9])/32768.f*2000.f/180.f*M_PI;
+    imu_data[0].gyro_z = (int16_t)(spi1_rx_data_dma[12]<<8 | spi1_rx_data_dma[11])/32768.f*2000.f/180.f*M_PI;
+
+    omega_ctrl(&omega_cmd,&prop_speed_cmd);
+  }
+  if (hspi->Instance == SPI2) {
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
+    pressure = spi2_rx_data_dma[3]<<16 | spi2_rx_data_dma[2]<<8 | spi2_rx_data_dma[1];
+    if (pressure & 0x800000) {
+      pressure |= 0xFF000000;
+    }
   }
 }
 
@@ -420,16 +491,16 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
   if(huart->Instance == UART4)
   {
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_SET);
-    if (uart4_rx_data[0] == 0xB5 && uart4_rx_data[1] == 0x62)
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_SET);
+    if (uart4_rx_data_dma[0] == 0xB5 && uart4_rx_data_dma[1] == 0x62)
     {
-      if (uart4_rx_data[2] == 0x01 && uart4_rx_data[3] == 0x07)
+      if (uart4_rx_data_dma[2] == 0x01 && uart4_rx_data_dma[3] == 0x07)
       {
-        memcpy(&pvt, &uart4_rx_data[6], sizeof(UBX_NAV_PVT_t));
+        memcpy(&(pvt[0]), &uart4_rx_data_dma[6], sizeof(UBX_NAV_PVT_t));
       }
     }
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_RESET);
-    HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
+    // HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_RESET);
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data_dma,512);
   }
 }
 
@@ -448,7 +519,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     huart->gState = HAL_UART_STATE_READY;
     huart->RxState = HAL_UART_STATE_READY;
 
-    HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data,512);
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart4,uart4_rx_data_dma,512);
   }
 }
 
@@ -479,18 +550,103 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_15)
   {
-    uint8_t rx_data[6] = {0};
-    HAL_I2C_Mem_Read(&hi2c2,IST_DEV_ADDR << 1,IST_MAG_X_LOW,\
-    I2C_MEMADD_SIZE_8BIT,rx_data,6,1000);
-
-    mag_data.mag_x = ((int16_t)(rx_data[1]<<8 | rx_data[0]))*300.f;
-    mag_data.mag_y = ((int16_t)(rx_data[3]<<8 | rx_data[2]))*300.f;
-    mag_data.mag_z = -((int16_t)(rx_data[5]<<8 | rx_data[4]))*300.f;
-
-    uint8_t reg_val = 0x01;
-    HAL_I2C_Mem_Write(&hi2c2,IST_DEV_ADDR << 1,IST_REG_CNTRL1,\
-      I2C_MEMADD_SIZE_8BIT,&reg_val,1,1000);
+    mag_data[0].timestamp = __HAL_TIM_GET_COUNTER(&htim5);
+    HAL_I2C_Mem_Read_DMA(&hi2c2,IST_DEV_ADDR << 1,IST_MAG_X_LOW,\
+    I2C_MEMADD_SIZE_8BIT,i2c2_rx_data_dma,6);
   }
+
+  if (GPIO_Pin == GPIO_PIN_2)
+  {
+  }
+}
+
+
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c->Instance == I2C2)
+  {
+    i2c2_tx_data_dma = 0x01;
+    HAL_I2C_Mem_Write_DMA(&hi2c2,IST_DEV_ADDR << 1,IST_REG_CNTRL1,\
+      I2C_MEMADD_SIZE_8BIT,&i2c2_tx_data_dma,1);
+
+    mag_data[0].mag_x = ((int16_t)(i2c2_rx_data_dma[1]<<8 | i2c2_rx_data_dma[0]));
+    mag_data[0].mag_y = ((int16_t)(i2c2_rx_data_dma[3]<<8 | i2c2_rx_data_dma[2]));
+    mag_data[0].mag_z = -((int16_t)(i2c2_rx_data_dma[5]<<8 | i2c2_rx_data_dma[4]));
+  }
+}
+
+
+void omega_ctrl(omega_cmd_t* omega_cmd,prop_speed_cmd_t* p)
+{
+  // todo:由机身角速度指令计算螺旋桨指令
+  p->prop1 = 0;
+  p->prop2 = 0;
+  p->prop3 = 0;
+  p->prop4 = 0;
+}
+
+
+uint8_t BMP581_Init(void)
+{
+  HAL_Delay(2);
+  uint8_t reg_val = 0;
+  if (BMP581_ReadReg(BMP581_CHIP_ID_ADDR,&reg_val) != 0)
+  {
+    return 1;
+  }
+  if (reg_val != BMP581_CHIP_ID) {
+    return 2;
+  }
+
+  if (BMP581_ReadReg(BMP581_STATUS,&reg_val)!=HAL_OK) {
+    return 4;
+  };
+  if ((reg_val & 0x04)) {
+    return 6;
+  }
+
+  BMP581_WriteReg(BMP581_INT_SOURCE,0x01);
+  BMP581_WriteReg(BMP581_INT_CONFIG,0x3A);
+
+  BMP581_WriteReg(BMP581_OSR_CONFIG,0x40);
+  BMP581_WriteReg(BMP581_ODR_CONFIG,0x81);
+
+  return 0;
+}
+
+uint8_t BMP581_ReadReg(uint8_t reg_addr,uint8_t* reg_data)
+{
+  uint8_t spi2_tx_buf[2];
+  spi2_tx_buf[0] = 0x80 | reg_addr;
+  uint8_t spi2_rx_buf[2] = {0};
+  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET);
+  if (HAL_SPI_TransmitReceive(&hspi2,spi2_tx_buf,spi2_rx_buf,2,1000)!=HAL_OK)
+  {
+    HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+    return 1;
+  }
+  else
+  {
+    HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+    *reg_data = spi2_rx_buf[1];
+    return 0;
+  }
+}
+
+
+uint8_t BMP581_WriteReg(uint8_t reg_addr,uint8_t reg_data)
+{
+  uint8_t spi2_tx_buf[2];
+  uint8_t spi2_rx_buf[2];
+  spi2_tx_buf[0] = 0x7F & reg_addr;
+  spi2_tx_buf[1] = reg_data;
+  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET);
+  if (HAL_SPI_TransmitReceive(&hspi2,spi2_tx_buf,spi2_rx_buf,2,1000)!=HAL_OK) {
+    HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+    return 1;
+  }
+  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_12,GPIO_PIN_SET);
+  return 0;
 }
 /* USER CODE END 4 */
 
